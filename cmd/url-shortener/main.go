@@ -5,12 +5,13 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"syscall"
-	"time"
+
+	"log/slog"
 
 	"github.com/go-chi/chi/v5"
 	"github.com/go-chi/chi/v5/middleware"
-	"golang.org/x/exp/slog"
 
 	"url-shortener/internal/config"
 	"url-shortener/internal/http-server/handlers/redirect"
@@ -31,6 +32,7 @@ func main() {
 	cfg := config.MustLoad()
 
 	log := setupLogger(cfg.Env)
+	// log = log.With(slog.String("env", cfg.Env))
 
 	log.Info(
 		"starting url-shortener",
@@ -39,11 +41,24 @@ func main() {
 	)
 	log.Debug("debug messages are enabled")
 
+	dirPath := filepath.Dir(cfg.StoragePath)
+	if _, err := os.Stat(dirPath); os.IsNotExist(err) {
+		if err := os.MkdirAll(dirPath, os.ModePerm); err != nil {
+			log.Error("failed to make storage dirs", sl.Err(err))
+			os.Exit(1)
+		}
+	}
+
 	storage, err := sqlite.New(cfg.StoragePath)
 	if err != nil {
 		log.Error("failed to init storage", sl.Err(err))
 		os.Exit(1)
 	}
+	defer func() {
+		if err := storage.Close(); err != nil {
+			log.Error("failed to close storage", sl.Err(err))
+		}
+	}()
 
 	router := chi.NewRouter()
 
@@ -79,7 +94,7 @@ func main() {
 
 	go func() {
 		if err := srv.ListenAndServe(); err != nil {
-			log.Error("failed to start server")
+			log.Error("failed to serve server")
 		}
 	}()
 
@@ -88,17 +103,13 @@ func main() {
 	<-done
 	log.Info("stopping server")
 
-	// TODO: move timeout to config
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), cfg.HTTPServer.ShutdownTimeout)
 	defer cancel()
 
 	if err := srv.Shutdown(ctx); err != nil {
 		log.Error("failed to stop server", sl.Err(err))
-
 		return
 	}
-
-	// TODO: close storage
 
 	log.Info("server stopped")
 }

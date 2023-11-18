@@ -31,7 +31,7 @@ func Error(msg string) Response {
 }
 
 func ValidationError(errs validator.ValidationErrors) Response {
-	var errMsgs []string
+	errMsgs := make([]string, 0, len(errs))
 
 	for _, err := range errs {
 		switch err.ActualTag() {

@@ -4,6 +4,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"strings"
 
 	"github.com/mattn/go-sqlite3"
 
@@ -11,7 +12,9 @@ import (
 )
 
 type Storage struct {
-	db *sql.DB
+	db         *sql.DB
+	stmtInsert *sql.Stmt
+	stmtSelect *sql.Stmt
 }
 
 func New(storagePath string) (*Storage, error) {
@@ -22,34 +25,34 @@ func New(storagePath string) (*Storage, error) {
 		return nil, fmt.Errorf("%s: %w", op, err)
 	}
 
-	stmt, err := db.Prepare(`
+	if _, err := db.Exec(`
 	CREATE TABLE IF NOT EXISTS url(
 		id INTEGER PRIMARY KEY,
 		alias TEXT NOT NULL UNIQUE,
 		url TEXT NOT NULL);
 	CREATE INDEX IF NOT EXISTS idx_alias ON url(alias);
-	`)
+	`); err != nil {
+		return nil, fmt.Errorf("%s: %w", op, err)
+	}
+
+	stmtInsert, err := db.Prepare("INSERT INTO url(url, alias) VALUES(?, ?)")
 	if err != nil {
 		return nil, fmt.Errorf("%s: %w", op, err)
 	}
 
-	_, err = stmt.Exec()
+	stmtSelect, err := db.Prepare("SELECT url FROM url WHERE alias = ?")
 	if err != nil {
 		return nil, fmt.Errorf("%s: %w", op, err)
 	}
 
-	return &Storage{db: db}, nil
+	return &Storage{db, stmtInsert, stmtSelect}, nil
 }
 
-func (s *Storage) SaveURL(urlToSave string, alias string) (int64, error) {
+// SaveURL реализует интерфейс URLSaver
+func (s *Storage) SaveURL(urlToSave, alias string) (int64, error) {
 	const op = "storage.sqlite.SaveURL"
 
-	stmt, err := s.db.Prepare("INSERT INTO url(url, alias) VALUES(?, ?)")
-	if err != nil {
-		return 0, fmt.Errorf("%s: %w", op, err)
-	}
-
-	res, err := stmt.Exec(urlToSave, alias)
+	res, err := s.stmtInsert.Exec(urlToSave, alias)
 	if err != nil {
 		if sqliteErr, ok := err.(sqlite3.Error); ok && sqliteErr.ExtendedCode == sqlite3.ErrConstraintUnique {
 			return 0, fmt.Errorf("%s: %w", op, storage.ErrURLExists)
@@ -69,14 +72,9 @@ func (s *Storage) SaveURL(urlToSave string, alias string) (int64, error) {
 func (s *Storage) GetURL(alias string) (string, error) {
 	const op = "storage.sqlite.GetURL"
 
-	stmt, err := s.db.Prepare("SELECT url FROM url WHERE alias = ?")
-	if err != nil {
-		return "", fmt.Errorf("%s: prepare statement: %w", op, err)
-	}
-
 	var resURL string
 
-	err = stmt.QueryRow(alias).Scan(&resURL)
+	err := s.stmtSelect.QueryRow(alias).Scan(&resURL)
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return "", storage.ErrURLNotFound
@@ -86,6 +84,24 @@ func (s *Storage) GetURL(alias string) (string, error) {
 	}
 
 	return resURL, nil
+}
+
+func (s *Storage) Close() error {
+	const op = "storage.sqlite.Close"
+	errs := make([]string, 0, 3)
+	if err := s.stmtInsert.Close(); err != nil {
+		errs = append(errs, err.Error())
+	}
+	if err := s.stmtSelect.Close(); err != nil {
+		errs = append(errs, err.Error())
+	}
+	if err := s.db.Close(); err != nil {
+		errs = append(errs, err.Error())
+	}
+	if len(errs) != 0 {
+		return fmt.Errorf("%s: %s", op, strings.Join(errs, ", "))
+	}
+	return nil
 }
 
 // TODO: implement method
